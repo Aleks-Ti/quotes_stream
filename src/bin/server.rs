@@ -1,5 +1,6 @@
 //! Сервер для поставки данных катировок.
 #![warn(missing_docs)]
+use std::fmt;
 use std::sync::Arc;
 use std::{
     collections::HashMap,
@@ -25,6 +26,22 @@ pub struct StockQuote {
     pub timestamp: u64,
 }
 
+impl Default for StockQuote {
+    fn default() -> Self {
+        StockQuote::new()
+    }
+}
+
+impl fmt::Display for StockQuote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}|{}|{}|{}",
+            self.ticker, self.price, self.volume, self.timestamp
+        )
+    }
+}
+
 impl StockQuote {
     /// Конструктор.
     pub fn new() -> Self {
@@ -38,13 +55,13 @@ impl StockQuote {
                 .as_secs(),
         }
     }
-    /// Преобразование данных из структуры [`StockQuote`] в строковое представление.
-    pub fn to_string(&self) -> String {
-        format!(
-            "{}|{}|{}|{}",
-            self.ticker, self.price, self.volume, self.timestamp
-        )
-    }
+    // /// Преобразование данных из структуры [`StockQuote`] в строковое представление.
+    // pub fn to_string(&self) -> String {
+    //     format!(
+    //         "{}|{}|{}|{}",
+    //         self.ticker, self.price, self.volume, self.timestamp
+    //     )
+    // }
 
     /// Преобразование данных из строкового представления в структуру [`StockQuote`].
     /// Пример данных с которыми работает данный метод: [`StockQuote::to_string`].
@@ -116,9 +133,9 @@ fn base_load_quotes() -> Result<HashMap<String, StockQuote>, Error> {
     Ok(data)
 }
 
-fn tcp_handler(stream: TcpStream, quotes: Arc<HashMap<String, StockQuote>>) {
+fn tcp_handler(stream: TcpStream, _: Arc<HashMap<String, StockQuote>>) {
     let mut writer = stream.try_clone().expect("failed to clone stream");
-    let mut reader = BufReader::new(stream);
+    //  let mut reader = BufReader::new(stream);
 
     let _ = writer.write_all(b"Welcome to the Qutes stream server!\n");
     let _ = writer.flush();
