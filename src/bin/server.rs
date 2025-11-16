@@ -1,7 +1,14 @@
 //! Сервер для поставки данных катировок.
 
 #![warn(missing_docs)]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    fs,
+    io::{BufRead, BufReader},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use clap::Error;
 
 #[derive(Debug, Clone)]
 /// Структура для данных катировок.
@@ -17,6 +24,18 @@ pub struct StockQuote {
 }
 
 impl StockQuote {
+    /// Конструктор.
+    pub fn new() -> Self {
+        Self {
+            ticker: "DEFAULT".to_string(),
+            volume: 100_u32,
+            price: 100.0_f64,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }
+    }
     /// Преобразование данных из структуры [`StockQuote`] в строковое представление.
     pub fn to_string(&self) -> String {
         format!(
@@ -54,29 +73,51 @@ impl StockQuote {
         bytes
     }
 
-    // pub fn generate_quote(&mut self, ticker: &str) -> Option<StockQuote> {
-    //     // ... логика изменения цены ...
+    /// Генерирует произвольные рандомные данные для конкретной катировки.
+    pub fn generate_quote(&mut self, ticker: &str) -> Option<StockQuote> {
+        let last_price = &mut self.price;
+        *last_price += (rand::random::<f64>() - 0.5) * 2.0; // небольшое изменение
 
-    //     let volume = match ticker {
-    //         // Популярные акции имеют больший объём, потому умножаем на большее число -> 5000
-    //         "AAPL" | "MSFT" | "TSLA" => 1000 + (rand::random::<f64>() * 5000.0) as u32,
-    //         // Обычные акции - средний объём
-    //         _ => 100 + (rand::random::<f64>() * 1000.0) as u32,
-    //     };
+        let volume = match ticker {
+            // Популярные акции имеют больший объём, потому умножаем на большее число -> 5000
+            "AAPL" | "MSFT" | "TSLA" => 1000 + (rand::random::<f64>() * 5000.0) as u32,
+            // Обычные акции - средний объём
+            _ => 100 + (rand::random::<f64>() * 1000.0) as u32,
+        };
 
-    //     Some(StockQuote {
-    //         ticker: ticker.to_string(),
-    //         price: *last_price,
-    //         volume,
-    //         timestamp: SystemTime::now()
-    //             .duration_since(UNIX_EPOCH)
-    //             .unwrap()
-    //             .as_millis() as u64,
-    //     })
-    // }
+        Some(StockQuote {
+            ticker: ticker.to_string(),
+            price: *last_price,
+            volume,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        })
+    }
 }
 
-fn main() {}
+fn base_load_quotes() -> Result<HashMap<String, StockQuote>, Error> {
+    let mut data = HashMap::new();
+    let file_with_all_quotes = fs::File::open("tickers.txt");
+    let file_reader = BufReader::new(file_with_all_quotes.unwrap());
+    for line in file_reader.lines() {
+        let line_string = line.expect("Ошибка чтения строки из файла");
+        let mut default_quotes = StockQuote::new();
+        if let Some(quote) = default_quotes.generate_quote(&line_string) {
+            data.insert(line_string, quote);
+        }
+    }
+    // for (ticker, quote) in &data {
+    //     println!("{:?}: {:?}", ticker, quote);
+    // }
+    Ok(data)
+}
+
+fn main() {
+    let quotes = base_load_quotes();
+    
+}
 
 #[cfg(test)]
 mod tests {
