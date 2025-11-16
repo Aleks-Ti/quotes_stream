@@ -1,10 +1,12 @@
 //! Сервер для поставки данных катировок.
-
 #![warn(missing_docs)]
+use std::sync::Arc;
 use std::{
     collections::HashMap,
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
+    net::{TcpListener, TcpStream},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -114,9 +116,33 @@ fn base_load_quotes() -> Result<HashMap<String, StockQuote>, Error> {
     Ok(data)
 }
 
-fn main() {
-    let quotes = base_load_quotes();
-    
+fn tcp_handler(stream: TcpStream, quotes: Arc<HashMap<String, StockQuote>>) {
+    let mut writer = stream.try_clone().expect("failed to clone stream");
+    let mut reader = BufReader::new(stream);
+
+    let _ = writer.write_all(b"Welcome to the Qutes stream server!\n");
+    let _ = writer.flush();
+    let mut line = String::new();
+    loop {
+        line.clear();
+    }
+}
+
+fn main() -> std::io::Result<()> {
+    let quotes: Arc<HashMap<String, StockQuote>> = Arc::new(base_load_quotes().unwrap());
+    let listener = TcpListener::bind("127.0.0.1:8080")?;
+    for stream in listener.incoming() {
+        let clone_quotes = quotes.clone();
+        match stream {
+            Ok(stream) => {
+                thread::spawn(move || {
+                    tcp_handler(stream, clone_quotes);
+                });
+            }
+            Err(e) => eprintln!("Connection failed: {}", e),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
