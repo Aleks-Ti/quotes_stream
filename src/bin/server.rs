@@ -137,6 +137,7 @@ fn tcp_handler(stream: TcpStream, _: Arc<RwLock<HashMap<String, StockQuote>>>) {
                 }
                 // let mut parts = input.split_whitespace();
                 // let response = match parts.next() {};
+                // NOTE:сделать реакцию на правильный запрос и создать отдельный поток для клиента со стримом запрошенных катировок
             }
             Err(_) => {
                 return;
@@ -162,16 +163,20 @@ fn base_load_quotes() -> Result<HashMap<String, StockQuote>, Error> {
     Ok(data)
 }
 
-/// Постоянное изменение цен в отдельном потоке.
+/// Постоянное изменение цен([StockQuote::price]) в отдельном потоке.
 fn price_changes(quotes: Arc<RwLock<HashMap<String, StockQuote>>>) {
     loop {
         {
             let mut map = quotes.write().unwrap();
+            let mut count = 0;
             for (ticker, stock) in map.iter_mut() {
                 stock.generate_quote(ticker);
+                count += 1;
             }
+            println!("{}", count) // for test[я в ахуе какой быстрый код] -> its blaizing fast!
         }
-        thread::sleep(time::Duration::from_millis(10));
+        println!("update");
+        thread::sleep(time::Duration::from_millis(100));
     }
 }
 
