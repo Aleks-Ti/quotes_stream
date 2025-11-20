@@ -1,7 +1,6 @@
 //! Сервер для поставки данных катировок.
 #![warn(missing_docs)]
-use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::{
     collections::HashMap,
     fs,
@@ -10,6 +9,7 @@ use std::{
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
+use std::{fmt, time};
 
 use clap::Error;
 
@@ -55,7 +55,7 @@ impl StockQuote {
                 .as_secs(),
         }
     }
-    // /// Преобразование данных из структуры [`StockQuote`] в строковое представление.
+    // Преобразование данных из структуры [`StockQuote`] в строковое представление.
     // pub fn to_string(&self) -> String {
     //     format!(
     //         "{}|{}|{}|{}",
@@ -116,6 +116,35 @@ impl StockQuote {
     }
 }
 
+fn tcp_handler(stream: TcpStream, _: Arc<RwLock<HashMap<String, StockQuote>>>) {
+    let mut writer = stream.try_clone().expect("failed to clone stream");
+    let mut reader = BufReader::new(stream);
+
+    let _ = writer.write_all(b"Welcome to the Qutes stream server!\n");
+    let _ = writer.flush();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                return;
+            }
+            Ok(_) => {
+                let input = line.trim();
+                if input.is_empty() {
+                    let _ = writer.flush();
+                    continue;
+                }
+                // let mut parts = input.split_whitespace();
+                // let response = match parts.next() {};
+            }
+            Err(_) => {
+                return;
+            }
+        }
+    }
+}
+
 fn base_load_quotes() -> Result<HashMap<String, StockQuote>, Error> {
     let mut data = HashMap::new();
     let file_with_all_quotes = fs::File::open("tickers.txt");
@@ -133,21 +162,24 @@ fn base_load_quotes() -> Result<HashMap<String, StockQuote>, Error> {
     Ok(data)
 }
 
-fn tcp_handler(stream: TcpStream, _: Arc<HashMap<String, StockQuote>>) {
-    let mut writer = stream.try_clone().expect("failed to clone stream");
-    //  let mut reader = BufReader::new(stream);
-
-    let _ = writer.write_all(b"Welcome to the Qutes stream server!\n");
-    let _ = writer.flush();
-    let mut line = String::new();
+/// Постоянное изменение цен в отдельном потоке.
+fn price_changes(quotes: Arc<RwLock<HashMap<String, StockQuote>>>) {
     loop {
-        line.clear();
+        {
+            let mut map = quotes.write().unwrap();
+            for (ticker, stock) in map.iter_mut() {
+                stock.generate_quote(ticker);
+            }
+        }
+        thread::sleep(time::Duration::from_millis(10));
     }
 }
 
 fn main() -> std::io::Result<()> {
-    let quotes: Arc<HashMap<String, StockQuote>> = Arc::new(base_load_quotes().unwrap());
+    let quotes = Arc::new(RwLock::new(base_load_quotes().unwrap()));
     let listener = TcpListener::bind("127.0.0.1:8080")?;
+    let quotes_for_updater = quotes.clone();
+    thread::spawn(move || price_changes(quotes_for_updater));
     for stream in listener.incoming() {
         let clone_quotes = quotes.clone();
         match stream {
