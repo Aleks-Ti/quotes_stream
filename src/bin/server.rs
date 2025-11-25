@@ -56,6 +56,7 @@ fn udp_streamer(
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
                 eprintln!("UDP recv error: {}", e);
+                println!("kill loop");
                 break;
             }
         }
@@ -74,7 +75,7 @@ fn udp_streamer(
                         lines.push(line);
                     }
                 }
-
+                println!("{:?}", lines);
                 if !lines.is_empty() {
                     let msg = lines.join("\n") + "\n";
                     if let Err(e) = server_client_udp_socket.send_to(msg.as_bytes(), client_udp_addr) {
@@ -144,6 +145,7 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, tick_recv: Receiver<()>) {
                         };
                         if parsed_url.scheme() != "udp" {
                             let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidAddress,);
+                            continue;
                         }
                         let host = parsed_url.host_str().unwrap_or("127.0.0.1");
                         let port = parsed_url.port().unwrap_or(0);
@@ -157,6 +159,16 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, tick_recv: Receiver<()>) {
                             .filter(|s| !s.is_empty())
                             .collect();
 
+                        let map = match quotes.read() {
+                            Ok(m) => m,
+                            Err(_) => return,
+                        };
+
+                        if !tickers.iter().all(|ticker| map.contains_key(ticker)) {
+                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidTickers);
+                            continue;
+                        }
+
                         if tickers.is_empty() {
                             let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidTickers);
                             continue;
@@ -166,14 +178,14 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, tick_recv: Receiver<()>) {
                             Ok(sock) => Arc::new(sock),
                             Err(e) => {
                                 let _ = writeln!(writer, "ERROR: failed to create UDP socket: {}", e);
-                                continue;
+                                return;
                             }
                         };
                         let server_udp_addr = match client_udp_socket.local_addr() {
                             Ok(addr) => addr,
                             Err(e) => {
                                 let _ = writeln!(writer, "ERROR: failed to get local addr: {}", e);
-                                continue;
+                                return;
                             }
                         };
                         match addr.parse::<std::net::SocketAddr>() {
@@ -186,7 +198,7 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, tick_recv: Receiver<()>) {
                             }
                             Err(_) => {
                                 let _ = writeln!(writer, "ERROR: invalid socket address");
-                                continue;
+                                return;
                             }
                         }
                     }

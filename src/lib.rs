@@ -47,7 +47,7 @@ pub struct StockQuote {
     pub volume: u32,
     /// Цена за одну акцию.
     pub price: f64,
-    /// Данные актуальны на момент времени -> timestamp.
+    /// Время сделки -> timestamp.
     pub timestamp: u64,
 }
 
