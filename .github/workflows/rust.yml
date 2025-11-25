@@ -28,8 +28,8 @@ jobs:
     - name: Clippy lints (optional but good practice)
       run: cargo clippy -- -D warnings
 
-    - name: Install cargo-audit
-      run: cargo install cargo-audit
+    # - name: Install cargo-audit  # норм, правда долго по времени исполняется(~2м26s)
+    #   run: cargo install cargo-audit
 
-    - name: Security check
-      run: cargo audit
+    # - name: Security check  # годно, но не для ДЗ
+    #   run: cargo audit

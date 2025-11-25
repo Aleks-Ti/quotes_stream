@@ -3,6 +3,7 @@
 use clap::Error;
 use crossbeam_channel::{Receiver, Sender};
 use quotes_stream::BASE_SERVER_TCP_URL;
+use quotes_stream::ParseStreamError;
 use quotes_stream::StockQuote;
 use rand::Rng;
 use std::net::UdpSocket;
@@ -117,7 +118,7 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, tick_recv: Receiver<()>) {
                         let addr_str = match parts.next() {
                             Some(s) => s,
                             None => {
-                                let _ = writeln!(writer, "ERROR: missing UDP address. Expected udp://...");
+                                let _ = writeln!(writer, "ERROR: {}", ParseStreamError::MissingAddress);
                                 continue;
                             }
                         };
@@ -125,30 +126,24 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, tick_recv: Receiver<()>) {
                         let tickers_str = match parts.next() {
                             Some(s) => s,
                             None => {
-                                let _ = writeln!(
-                                    writer,
-                                    "ERROR: missing ticker list[AAPL,TSLA]. Expected message -> STREAM udp://127.0.0.1:34254 AAPL,TSLA"
-                                );
+                                let _ = writeln!(writer, "ERROR: {}", ParseStreamError::MissingTickers);
                                 continue;
                             }
                         };
 
                         if !addr_str.starts_with("udp://") {
-                            let _ = writeln!(writer, "ERROR: invalid protocol, expected messege -> STREAM udp://...");
+                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::MissingAddress);
                             continue;
                         }
                         let parsed_url = match Url::parse(addr_str) {
                             Ok(url) => url,
                             Err(_) => {
-                                let _ = writeln!(writer, "ERROR: invalid URL format");
+                                let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidUrl);
                                 continue;
                             }
                         };
                         if parsed_url.scheme() != "udp" {
-                            let _ = writeln!(
-                                writer,
-                                "ERROR: invalid protocol, expected message -> STREAM udp://127.0.0.1:34254 AAPL,TSLA"
-                            );
+                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidAddress,);
                         }
                         let host = parsed_url.host_str().unwrap_or("127.0.0.1");
                         let port = parsed_url.port().unwrap_or(0);
@@ -163,7 +158,7 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, tick_recv: Receiver<()>) {
                             .collect();
 
                         if tickers.is_empty() {
-                            let _ = writeln!(writer, "ERROR: no valid tickers provided");
+                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidTickers);
                             continue;
                         }
                         let addr = format!("{}:{}", host, port);

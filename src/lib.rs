@@ -9,6 +9,35 @@ pub const BASE_SERVER_TCP_URL: &str = "127.0.0.1:8080";
 /// Адрес общения с сервером [client.rs]
 pub const BASE_CLIENT_TCP_URL: &str = "127.0.0.1:8090";
 
+/// Ошибки клиенского запроса.
+#[derive(Debug)]
+pub enum ParseStreamError {
+    /// Отсутствует указатель но адрес udp:// для стриминга данных.
+    MissingAddress,
+    /// Отсутствуют Tickers для стриминга.
+    MissingTickers,
+    /// Не корректный url адрес.
+    InvalidUrl,
+    /// Не корректный представленный адрес для стриминга.
+    InvalidAddress,
+    /// Не корректные Tickers.
+    InvalidTickers,
+}
+
+impl std::fmt::Display for ParseStreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseStreamError::MissingAddress => write!(f, "missing UDP address. Expected udp://..."),
+            ParseStreamError::MissingTickers => {
+                write!(f, "missing ticker list. Expected message -> STREAM udp://127.0.0.1:34254 AAPL,TSLA")
+            }
+            ParseStreamError::InvalidUrl => write!(f, "invalid URL format"),
+            ParseStreamError::InvalidAddress => write!(f, "invalid socket address"),
+            ParseStreamError::InvalidTickers => write!(f, "no valid tickers provided"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 /// Структура для данных катировок.
 pub struct StockQuote {
