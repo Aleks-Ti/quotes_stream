@@ -27,3 +27,6 @@ jobs:
 
     - name: Clippy lints (optional but good practice)
       run: cargo clippy -- -D warnings
+    
+    - name: Security check
+      run: cargo audit

@@ -1,6 +1,11 @@
 //! Сервер для поставки данных катировок.
 #![warn(missing_docs)]
+use clap::Error;
+use crossbeam_channel::{Receiver, Sender};
+use rand::Rng;
+use std::net::UdpSocket;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use std::{
     collections::HashMap,
     fs,
@@ -10,8 +15,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use std::{fmt, time};
-
-use clap::Error;
+use url::Url;
 
 #[derive(Debug, Clone)]
 /// Структура для данных катировок.
@@ -34,11 +38,7 @@ impl Default for StockQuote {
 
 impl fmt::Display for StockQuote {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}|{}|{}|{}",
-            self.ticker, self.price, self.volume, self.timestamp
-        )
+        write!(f, "{}|{}|{}|{}", self.ticker, self.price, self.volume, self.timestamp)
     }
 }
 
@@ -49,10 +49,7 @@ impl StockQuote {
             ticker: "DEFAULT".to_string(),
             volume: 100_u32,
             price: 100.0_f64,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
         }
     }
     // Преобразование данных из структуры [`StockQuote`] в строковое представление.
@@ -108,15 +105,84 @@ impl StockQuote {
             ticker: ticker.to_string(),
             price: *last_price,
             volume,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
         })
     }
 }
 
-fn tcp_handler(stream: TcpStream, _: Arc<RwLock<HashMap<String, StockQuote>>>) {
+fn udp_streamer(
+    client_udp_addr: std::net::SocketAddr,
+    tickers: Vec<String>,
+    quotes: Arc<RwLock<HashMap<String, StockQuote>>>,
+    server_client_udp_socket: Arc<UdpSocket>,
+    tick_recv: Receiver<()>,
+) {
+    server_client_udp_socket.set_nonblocking(true).expect("nonblocking");
+
+    let mut last_ping = Instant::now();
+    let ping_timeout = Duration::from_secs(5);
+    let mut buf = [0; 64];
+
+    println!(
+        "UDP streamer for {} using local port {}",
+        client_udp_addr,
+        server_client_udp_socket.local_addr().unwrap().port()
+    );
+    loop {
+        if last_ping.elapsed() > ping_timeout {
+            println!("Client {} timed out (no PING)", client_udp_addr);
+            break;
+        }
+
+        match server_client_udp_socket.recv_from(&mut buf) {
+            Ok((size, src)) => {
+                if src != client_udp_addr {
+                    continue;
+                }
+                let msg = std::str::from_utf8(&buf[..size]).unwrap_or("").trim();
+                if msg == "PING" {
+                    last_ping = Instant::now();
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => {
+                eprintln!("UDP recv error: {}", e);
+                break;
+            }
+        }
+
+        match tick_recv.try_recv() {
+            Ok(()) => {
+                let map = match quotes.read() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+                let mut lines = Vec::new();
+                for ticker in &tickers {
+                    if let Some(quote) = map.get(ticker) {
+                        let line = format!("{}: {}; value: {}; time: {}\n", ticker, quote.price, quote.volume, quote.timestamp);
+                        lines.push(line);
+                    }
+                }
+
+                if !lines.is_empty() {
+                    let msg = lines.join("\n") + "\n";
+                    if let Err(e) = server_client_udp_socket.send_to(msg.as_bytes(), client_udp_addr) {
+                        eprintln!("UDP send error to {}: {}", client_udp_addr, e);
+                        break;
+                    }
+                }
+            }
+            Err(_) => {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn tcp_handler(stream: TcpStream, quotes: Arc<RwLock<HashMap<String, StockQuote>>>, tick_recv: Receiver<()>) {
     let mut writer = stream.try_clone().expect("failed to clone stream");
     let mut reader = BufReader::new(stream);
 
@@ -125,9 +191,10 @@ fn tcp_handler(stream: TcpStream, _: Arc<RwLock<HashMap<String, StockQuote>>>) {
     let mut line = String::new();
     loop {
         line.clear();
+        let tick_recv_clone = tick_recv.clone();
         match reader.read_line(&mut line) {
             Ok(0) => {
-                return;
+                continue;
             }
             Ok(_) => {
                 let input = line.trim();
@@ -135,9 +202,104 @@ fn tcp_handler(stream: TcpStream, _: Arc<RwLock<HashMap<String, StockQuote>>>) {
                     let _ = writer.flush();
                     continue;
                 }
-                // let mut parts = input.split_whitespace();
-                // let response = match parts.next() {};
-                // NOTE:сделать реакцию на правильный запрос и создать отдельный поток для клиента со стримом запрошенных катировок
+
+                let mut parts = input.split_whitespace();
+                match parts.next() {
+                    Some("STREAM") => {
+                        let addr_str = match parts.next() {
+                            Some(s) => s,
+                            None => {
+                                let _ = writeln!(writer, "ERROR: missing UDP address. Expected udp://...");
+                                continue;
+                            }
+                        };
+
+                        let tickers_str = match parts.next() {
+                            Some(s) => s,
+                            None => {
+                                let _ = writeln!(
+                                    writer,
+                                    "ERROR: missing ticker list[AAPL,TSLA]. Expected message -> STREAM udp://127.0.0.1:34254 AAPL,TSLA"
+                                );
+                                continue;
+                            }
+                        };
+
+                        if !addr_str.starts_with("udp://") {
+                            let _ = writeln!(writer, "ERROR: invalid protocol, expected messege -> STREAM udp://...");
+                            continue;
+                        }
+                        let parsed_url = match Url::parse(addr_str) {
+                            Ok(url) => url,
+                            Err(_) => {
+                                let _ = writeln!(writer, "ERROR: invalid URL format");
+                                continue;
+                            }
+                        };
+                        if parsed_url.scheme() != "udp" {
+                            let _ = writeln!(
+                                writer,
+                                "ERROR: invalid protocol, expected message -> STREAM udp://127.0.0.1:34254 AAPL,TSLA"
+                            );
+                        }
+                        let host = parsed_url.host_str().unwrap_or("127.0.0.1");
+                        let port = parsed_url.port().unwrap_or(0);
+                        if port == 0 {
+                            let _ = writeln!(writer, "ERROR: port is required");
+                            continue;
+                        }
+                        let tickers: Vec<String> = tickers_str
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+
+                        if tickers.is_empty() {
+                            let _ = writeln!(writer, "ERROR: no valid tickers provided");
+                            continue;
+                        }
+                        let addr = format!("{}:{}", host, port);
+                        let client_udp_socket = match UdpSocket::bind("0.0.0.0:0") {
+                            Ok(sock) => Arc::new(sock),
+                            Err(e) => {
+                                let _ = writeln!(writer, "ERROR: failed to create UDP socket: {}", e);
+                                continue;
+                            }
+                        };
+                        let server_udp_addr = match client_udp_socket.local_addr() {
+                            Ok(addr) => addr,
+                            Err(e) => {
+                                let _ = writeln!(writer, "ERROR: failed to get local addr: {}", e);
+                                continue;
+                            }
+                        };
+                        match addr.parse::<std::net::SocketAddr>() {
+                            Ok(client_socket_addr) => {
+                                let _ = writeln!(
+                                    writer,
+                                    "OK!\nstreaming_to: {}, send_PING_to {}",
+                                    client_socket_addr, server_udp_addr
+                                );
+                                let quotes_clone = quotes.clone();
+                                std::thread::spawn(move || {
+                                    udp_streamer(client_socket_addr, tickers, quotes_clone, client_udp_socket, tick_recv_clone);
+                                });
+                            }
+                            Err(_) => {
+                                let _ = writeln!(writer, "ERROR: invalid socket address");
+                                continue;
+                            }
+                        }
+                        let _ = writeln!(writer, "OK: PING PONG address => {}", server_udp_addr);
+                    }
+
+                    Some("PING") => {
+                        let _ = writeln!(writer, "PONG\n");
+                    }
+                    _ => {
+                        let _ = writeln!(writer, "ERROR: unknown command");
+                    }
+                };
             }
             Err(_) => {
                 return;
@@ -157,26 +319,22 @@ fn base_load_quotes() -> Result<HashMap<String, StockQuote>, Error> {
             data.insert(line_string, quote);
         }
     }
-    // for (ticker, quote) in &data {
-    //     println!("{:?}: {:?}", ticker, quote);
-    // }
     Ok(data)
 }
 
 /// Постоянное изменение цен([StockQuote::price]) в отдельном потоке.
-fn price_changes(quotes: Arc<RwLock<HashMap<String, StockQuote>>>) {
+fn update_quotes(quotes: Arc<RwLock<HashMap<String, StockQuote>>>, tick_sender: Sender<()>) {
     loop {
         {
             let mut map = quotes.write().unwrap();
-            let mut count = 0;
             for (ticker, stock) in map.iter_mut() {
                 stock.generate_quote(ticker);
-                count += 1;
             }
-            println!("{}", count) // for test[я в ахуе какой быстрый код] -> its blaizing fast!
+            let _ = tick_sender.try_send(());
         }
         println!("update");
-        thread::sleep(time::Duration::from_millis(100));
+        let sleep_ms = rand::thread_rng().gen_range(100..=1000);
+        thread::sleep(time::Duration::from_millis(sleep_ms));
     }
 }
 
@@ -184,13 +342,16 @@ fn main() -> std::io::Result<()> {
     let quotes = Arc::new(RwLock::new(base_load_quotes().unwrap()));
     let listener = TcpListener::bind("127.0.0.1:8080")?;
     let quotes_for_updater = quotes.clone();
-    thread::spawn(move || price_changes(quotes_for_updater));
+    let (tick_s, tick_r) = crossbeam_channel::bounded::<()>(100);
+    let tick_sender = tick_s.clone();
+    thread::spawn(move || update_quotes(quotes_for_updater, tick_sender));
     for stream in listener.incoming() {
-        let clone_quotes = quotes.clone();
+        let tick_recv_clone = tick_r.clone();
+        let quotes_clone = quotes.clone();
         match stream {
             Ok(stream) => {
                 thread::spawn(move || {
-                    tcp_handler(stream, clone_quotes);
+                    tcp_handler(stream, quotes_clone, tick_recv_clone);
                 });
             }
             Err(e) => eprintln!("Connection failed: {}", e),

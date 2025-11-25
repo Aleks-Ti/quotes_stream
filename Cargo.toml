@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 rand = "0.8"
 clap = { version = "4.0", features = ["derive"] }
+url = "2"
+anyhow = "1.0.100"
+crossbeam-channel = "0.5"
 
 [[bin]]
 name = "server"
