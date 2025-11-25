@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 use clap::Error;
 use crossbeam_channel::{Receiver, Sender};
+use quotes_stream::shared::constants::BASE_SERVER_TCP_URL;
 use rand::Rng;
 use std::net::UdpSocket;
 use std::sync::{Arc, RwLock};
@@ -113,7 +114,7 @@ impl StockQuote {
 fn udp_streamer(
     client_udp_addr: std::net::SocketAddr,
     tickers: Vec<String>,
-    quotes: Arc<RwLock<HashMap<String, StockQuote>>>,
+    quotes: StockMap,
     server_client_udp_socket: Arc<UdpSocket>,
     tick_recv: Receiver<()>,
 ) {
@@ -182,7 +183,7 @@ fn udp_streamer(
     }
 }
 
-fn tcp_handler(stream: TcpStream, quotes: Arc<RwLock<HashMap<String, StockQuote>>>, tick_recv: Receiver<()>) {
+fn tcp_handler(stream: TcpStream, quotes: StockMap, tick_recv: Receiver<()>) {
     let mut writer = stream.try_clone().expect("failed to clone stream");
     let mut reader = BufReader::new(stream);
 
@@ -275,11 +276,7 @@ fn tcp_handler(stream: TcpStream, quotes: Arc<RwLock<HashMap<String, StockQuote>
                         };
                         match addr.parse::<std::net::SocketAddr>() {
                             Ok(client_socket_addr) => {
-                                let _ = writeln!(
-                                    writer,
-                                    "OK!\nstreaming_to: {}, send_PING_to {}",
-                                    client_socket_addr, server_udp_addr
-                                );
+                                let _ = writeln!(writer, "OK: streaming_to: {}, send_PING_to {}", client_socket_addr, server_udp_addr);
                                 let quotes_clone = quotes.clone();
                                 std::thread::spawn(move || {
                                     udp_streamer(client_socket_addr, tickers, quotes_clone, client_udp_socket, tick_recv_clone);
@@ -290,7 +287,6 @@ fn tcp_handler(stream: TcpStream, quotes: Arc<RwLock<HashMap<String, StockQuote>
                                 continue;
                             }
                         }
-                        let _ = writeln!(writer, "OK: PING PONG address => {}", server_udp_addr);
                     }
 
                     Some("PING") => {
@@ -308,50 +304,59 @@ fn tcp_handler(stream: TcpStream, quotes: Arc<RwLock<HashMap<String, StockQuote>
     }
 }
 
-fn base_load_quotes() -> Result<HashMap<String, StockQuote>, Error> {
-    let mut data = HashMap::new();
-    let file_with_all_quotes = fs::File::open("tickers.txt");
-    let file_reader = BufReader::new(file_with_all_quotes.unwrap());
-    for line in file_reader.lines() {
-        let line_string = line.expect("Ошибка чтения строки из файла");
-        let mut default_quotes = StockQuote::new();
-        if let Some(quote) = default_quotes.generate_quote(&line_string) {
-            data.insert(line_string, quote);
+/// Базовый обработчик для работы со [StockQuote]
+pub struct QuoteHandler {}
+
+impl QuoteHandler {
+    /// Загрузчик default данных для stream катировок.
+    pub fn base_load_quotes() -> Result<HashMap<String, StockQuote>, Error> {
+        let mut data = HashMap::new();
+        let file_with_all_quotes = fs::File::open("tickers.txt");
+        let file_reader = BufReader::new(file_with_all_quotes.unwrap());
+        for line in file_reader.lines() {
+            let line_string = line.expect("Ошибка чтения строки из файла");
+            let mut default_quotes = StockQuote::new();
+            if let Some(quote) = default_quotes.generate_quote(&line_string) {
+                data.insert(line_string, quote);
+            }
+        }
+        Ok(data)
+    }
+
+    /// Постоянное изменение цен([StockQuote::price]) в отдельном потоке.
+    pub fn update_quotes(quotes: StockMap, tick_sender: Sender<()>) {
+        loop {
+            {
+                let mut map = quotes.write().unwrap();
+                for (ticker, stock) in map.iter_mut() {
+                    stock.generate_quote(ticker);
+                }
+                // ОТправляем сигнал по каналу, о том что катировки изменились.
+                let _ = tick_sender.try_send(());
+            }
+            println!("update");
+            let sleep_ms = rand::thread_rng().gen_range(100..=1000);
+            thread::sleep(time::Duration::from_millis(sleep_ms));
         }
     }
-    Ok(data)
 }
 
-/// Постоянное изменение цен([StockQuote::price]) в отдельном потоке.
-fn update_quotes(quotes: Arc<RwLock<HashMap<String, StockQuote>>>, tick_sender: Sender<()>) {
-    loop {
-        {
-            let mut map = quotes.write().unwrap();
-            for (ticker, stock) in map.iter_mut() {
-                stock.generate_quote(ticker);
-            }
-            let _ = tick_sender.try_send(());
-        }
-        println!("update");
-        let sleep_ms = rand::thread_rng().gen_range(100..=1000);
-        thread::sleep(time::Duration::from_millis(sleep_ms));
-    }
-}
+type StockMap = Arc<RwLock<HashMap<String, StockQuote>>>;
 
 fn main() -> std::io::Result<()> {
-    let quotes = Arc::new(RwLock::new(base_load_quotes().unwrap()));
-    let listener = TcpListener::bind("127.0.0.1:8080")?;
+    let quotes = Arc::new(RwLock::new(QuoteHandler::base_load_quotes().unwrap()));
+    let listener = TcpListener::bind(BASE_SERVER_TCP_URL)?;
     let quotes_for_updater = quotes.clone();
     let (tick_s, tick_r) = crossbeam_channel::bounded::<()>(100);
     let tick_sender = tick_s.clone();
-    thread::spawn(move || update_quotes(quotes_for_updater, tick_sender));
+    thread::spawn(move || QuoteHandler::update_quotes(quotes_for_updater, tick_sender));
     for stream in listener.incoming() {
         let tick_recv_clone = tick_r.clone();
-        let quotes_clone = quotes.clone();
+        let quotes_for_read = quotes.clone();
         match stream {
             Ok(stream) => {
                 thread::spawn(move || {
-                    tcp_handler(stream, quotes_clone, tick_recv_clone);
+                    tcp_handler(stream, quotes_for_read, tick_recv_clone);
                 });
             }
             Err(e) => eprintln!("Connection failed: {}", e),
