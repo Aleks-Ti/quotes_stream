@@ -2,10 +2,12 @@
 #![warn(missing_docs)]
 use clap::Error;
 use crossbeam_channel::{Receiver, Sender};
-use quotes_stream::shared::constants::BASE_SERVER_TCP_URL;
+use quotes_stream::BASE_SERVER_TCP_URL;
+use quotes_stream::StockQuote;
 use rand::Rng;
 use std::net::UdpSocket;
 use std::sync::{Arc, RwLock};
+use std::time;
 use std::time::{Duration, Instant};
 use std::{
     collections::HashMap,
@@ -13,103 +15,8 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
 };
-use std::{fmt, time};
 use url::Url;
-
-#[derive(Debug, Clone)]
-/// Структура для данных катировок.
-pub struct StockQuote {
-    /// Катировка -> тикер: уникальное имя ценной бумаги на рынке.
-    pub ticker: String,
-    /// Объём, количество акций.
-    pub volume: u32,
-    /// Цена за одну акцию.
-    pub price: f64,
-    /// Данные актуальны на момент времени -> timestamp.
-    pub timestamp: u64,
-}
-
-impl Default for StockQuote {
-    fn default() -> Self {
-        StockQuote::new()
-    }
-}
-
-impl fmt::Display for StockQuote {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}|{}|{}|{}", self.ticker, self.price, self.volume, self.timestamp)
-    }
-}
-
-impl StockQuote {
-    /// Конструктор.
-    pub fn new() -> Self {
-        Self {
-            ticker: "DEFAULT".to_string(),
-            volume: 100_u32,
-            price: 100.0_f64,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-        }
-    }
-    // Преобразование данных из структуры [`StockQuote`] в строковое представление.
-    // pub fn to_string(&self) -> String {
-    //     format!(
-    //         "{}|{}|{}|{}",
-    //         self.ticker, self.price, self.volume, self.timestamp
-    //     )
-    // }
-
-    /// Преобразование данных из строкового представления в структуру [`StockQuote`].
-    /// Пример данных с которыми работает данный метод: [`StockQuote::to_string`].
-    pub fn from_string(s: &str) -> Option<Self> {
-        let parts: Vec<&str> = s.split('|').collect();
-        if parts.len() == 4 {
-            Some(StockQuote {
-                ticker: parts[0].to_string(),
-                price: parts[1].parse().ok()?,
-                volume: parts[2].parse().ok()?,
-                timestamp: parts[3].parse().ok()?,
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Бинарная сериализация. Для поставки данных катировок в бинароном виде.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(self.ticker.as_bytes());
-        bytes.push(b'|');
-        bytes.extend_from_slice(self.price.to_string().as_bytes());
-        bytes.push(b'|');
-        bytes.extend_from_slice(self.volume.to_string().as_bytes());
-        bytes.push(b'|');
-        bytes.extend_from_slice(self.timestamp.to_string().as_bytes());
-        bytes
-    }
-
-    /// Генерирует произвольные рандомные данные для конкретной катировки.
-    pub fn generate_quote(&mut self, ticker: &str) -> Option<StockQuote> {
-        let last_price = &mut self.price;
-        *last_price += (rand::random::<f64>() - 0.5) * 2.0; // небольшое изменение
-
-        let volume = match ticker {
-            // Популярные акции имеют больший объём, потому умножаем на большее число -> 5000
-            "AAPL" | "MSFT" | "TSLA" => 1000 + (rand::random::<f64>() * 5000.0) as u32,
-            // Обычные акции - средний объём
-            _ => 100 + (rand::random::<f64>() * 1000.0) as u32,
-        };
-
-        Some(StockQuote {
-            ticker: ticker.to_string(),
-            price: *last_price,
-            volume,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
-        })
-    }
-}
 
 fn udp_streamer(
     client_udp_addr: std::net::SocketAddr,
@@ -162,7 +69,7 @@ fn udp_streamer(
                 let mut lines = Vec::new();
                 for ticker in &tickers {
                     if let Some(quote) = map.get(ticker) {
-                        let line = format!("{}: {}; value: {}; time: {}\n", ticker, quote.price, quote.volume, quote.timestamp);
+                        let line = quote.to_string();
                         lines.push(line);
                     }
                 }

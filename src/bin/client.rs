@@ -1,4 +1,4 @@
-use quotes_stream::shared::constants::BASE_SERVER_TCP_URL;
+use quotes_stream::BASE_SERVER_TCP_URL;
 use std::net::TcpListener;
 
 pub struct TcpClient {}
