@@ -1,12 +1,12 @@
 //! Сервер для поставки данных катировок.
 #![warn(missing_docs)]
 use clap::Error;
-use crossbeam_channel::{Receiver, Sender};
 use quotes_stream::BASE_SERVER_TCP_URL;
 use quotes_stream::ParseStreamError;
 use quotes_stream::StockQuote;
 use rand::Rng;
 use std::net::UdpSocket;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::time;
 use std::time::{Duration, Instant};
@@ -61,7 +61,7 @@ fn udp_streamer(
             }
         }
 
-        match tick_recv.try_recv() {
+        match tick_recv.recv() {
             Ok(()) => {
                 let map = match quotes.read() {
                     Ok(m) => m,
@@ -75,9 +75,10 @@ fn udp_streamer(
                         lines.push(line);
                     }
                 }
-                println!("{:?}", lines);
+                println!("{:?}", tickers);
                 if !lines.is_empty() {
                     let msg = lines.join("\n") + "\n";
+                    println!("{}", msg);
                     if let Err(e) = server_client_udp_socket.send_to(msg.as_bytes(), client_udp_addr) {
                         eprintln!("UDP send error to {}: {}", client_udp_addr, e);
                         break;
@@ -88,11 +89,10 @@ fn udp_streamer(
                 break;
             }
         }
-        thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn tcp_handler(stream: TcpStream, quotes: StockMap, tick_recv: Receiver<()>) {
+fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
     let mut writer = stream.try_clone().expect("failed to clone stream");
     let mut reader = BufReader::new(stream);
 
@@ -101,7 +101,6 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, tick_recv: Receiver<()>) {
     let mut line = String::new();
     loop {
         line.clear();
-        let tick_recv_clone = tick_recv.clone();
         match reader.read_line(&mut line) {
             Ok(0) => {
                 continue;
@@ -188,12 +187,16 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, tick_recv: Receiver<()>) {
                                 return;
                             }
                         };
+                        let (sender, receiver) = std::sync::mpsc::channel();
+                        {
+                            senders.write().unwrap().push(sender);
+                        }
                         match addr.parse::<std::net::SocketAddr>() {
                             Ok(client_socket_addr) => {
                                 let _ = writeln!(writer, "OK: streaming_to: {}, send_PING_to {}", client_socket_addr, server_udp_addr);
                                 let quotes_clone = quotes.clone();
                                 std::thread::spawn(move || {
-                                    udp_streamer(client_socket_addr, tickers, quotes_clone, client_udp_socket, tick_recv_clone);
+                                    udp_streamer(client_socket_addr, tickers, quotes_clone, client_udp_socket, receiver);
                                 });
                             }
                             Err(_) => {
@@ -238,15 +241,26 @@ impl QuoteHandler {
     }
 
     /// Постоянное изменение цен([StockQuote::price]) в отдельном потоке.
-    pub fn update_quotes(quotes: StockMap, tick_sender: Sender<()>) {
+    pub fn update_quotes(quotes: StockMap, senders: SendersList) {
         loop {
             {
                 let mut map = quotes.write().unwrap();
                 for (ticker, stock) in map.iter_mut() {
                     stock.generate_quote(ticker);
                 }
-                // ОТправляем сигнал по каналу, о том что катировки изменились.
-                let _ = tick_sender.try_send(());
+                let mut dead_senders = Vec::new();
+                for (i, sender) in senders.read().unwrap().iter().enumerate() {
+                    if sender.send(()).is_err() {
+                        dead_senders.push(i);
+                    }
+                }
+
+                if !dead_senders.is_empty() {
+                    let mut list = senders.write().unwrap();
+                    for &i in dead_senders.iter().rev() {
+                        list.remove(i);
+                    }
+                }
             }
             println!("update");
             let sleep_ms = rand::thread_rng().gen_range(100..=1000);
@@ -256,21 +270,22 @@ impl QuoteHandler {
 }
 
 type StockMap = Arc<RwLock<HashMap<String, StockQuote>>>;
+type SendersList = Arc<RwLock<Vec<Sender<()>>>>;
 
 fn main() -> std::io::Result<()> {
     let quotes = Arc::new(RwLock::new(QuoteHandler::base_load_quotes().unwrap()));
+    let senders = Arc::new(RwLock::new(Vec::new()));
     let listener = TcpListener::bind(BASE_SERVER_TCP_URL)?;
     let quotes_for_updater = quotes.clone();
-    let (tick_s, tick_r) = crossbeam_channel::bounded::<()>(100);
-    let tick_sender = tick_s.clone();
-    thread::spawn(move || QuoteHandler::update_quotes(quotes_for_updater, tick_sender));
+    let clone_senders = senders.clone();
+    thread::spawn(move || QuoteHandler::update_quotes(quotes_for_updater, clone_senders));
     for stream in listener.incoming() {
-        let tick_recv_clone = tick_r.clone();
+        let clone_senders = senders.clone();
         let quotes_for_read = quotes.clone();
         match stream {
             Ok(stream) => {
                 thread::spawn(move || {
-                    tcp_handler(stream, quotes_for_read, tick_recv_clone);
+                    tcp_handler(stream, quotes_for_read, clone_senders);
                 });
             }
             Err(e) => eprintln!("Connection failed: {}", e),
