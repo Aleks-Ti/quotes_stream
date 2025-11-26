@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Адрес для прослушивания [server.rs]
 pub const BASE_SERVER_TCP_URL: &str = "127.0.0.1:8080";
 /// Адрес общения с сервером [client.rs]
-pub const BASE_CLIENT_TCP_URL: &str = "127.0.0.1:8090";
+pub const UDP_STREAM_TIMEOUT: u64 = 5;
 
 /// Ошибки клиенского запроса.
 #[derive(Debug)]
@@ -22,6 +22,8 @@ pub enum ParseStreamError {
     InvalidAddress,
     /// Не корректные Tickers.
     InvalidTickers,
+    /// Не корректно указанный port для прослушивания.
+    InvalidPort,
 }
 
 impl std::fmt::Display for ParseStreamError {
@@ -34,6 +36,7 @@ impl std::fmt::Display for ParseStreamError {
             ParseStreamError::InvalidUrl => write!(f, "invalid URL format"),
             ParseStreamError::InvalidAddress => write!(f, "invalid socket address"),
             ParseStreamError::InvalidTickers => write!(f, "no valid tickers provided"),
+            ParseStreamError::InvalidPort => write!(f, "no valid port"),
         }
     }
 }

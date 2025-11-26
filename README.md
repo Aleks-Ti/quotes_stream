@@ -8,19 +8,27 @@
 cargo run --bin server
 ```
 
-## Клиентский сервер
+TCP клиент для проверки:
 
 ```bash
-cargo run --bin client -- --server-addr 127.0.0.1:8080 --udp-port 34254 --tickers-file test_tickers.txt
+nc 127.0.0.1 8080
+STREAM udp://127.0.0.1:34254 AAPL,TSLA
+STREAM udp://127.0.0.1:34255 AAPL,PGR
 ```
 
+UDP прослушиватель для проверки:
+
 ```bash
-# прослушиватель
 nc -u -l 34254
 nc -u -l 34255
 ```
 
+## Клиентский сервер
+
 ```bash
-STREAM udp://127.0.0.1:34254 AAPL,TSLA
-STREAM udp://127.0.0.1:34255 AAPL,PGR
+cargo run --bin client -- --help
+```
+
+```bash
+cargo run --bin client -- --server-addr 127.0.0.1:8080 --udp-port 34254 --tickers-file test_tickers.txt
 ```

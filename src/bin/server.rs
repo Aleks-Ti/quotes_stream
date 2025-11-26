@@ -1,9 +1,9 @@
 //! Сервер для поставки данных катировок.
 #![warn(missing_docs)]
 use clap::Error;
-use quotes_stream::BASE_SERVER_TCP_URL;
 use quotes_stream::ParseStreamError;
 use quotes_stream::StockQuote;
+use quotes_stream::{BASE_SERVER_TCP_URL, UDP_STREAM_TIMEOUT};
 use rand::Rng;
 use std::net::UdpSocket;
 use std::sync::mpsc::{Receiver, Sender};
@@ -24,12 +24,12 @@ fn udp_streamer(
     tickers: Vec<String>,
     quotes: StockMap,
     server_client_udp_socket: Arc<UdpSocket>,
-    tick_recv: Receiver<()>,
+    receiver: Receiver<()>,
 ) {
     server_client_udp_socket.set_nonblocking(true).expect("nonblocking");
 
     let mut last_ping = Instant::now();
-    let ping_timeout = Duration::from_secs(5);
+    let ping_timeout = Duration::from_secs(UDP_STREAM_TIMEOUT);
     let mut buf = [0; 64];
 
     println!(
@@ -39,7 +39,6 @@ fn udp_streamer(
     );
     loop {
         if last_ping.elapsed() > ping_timeout {
-            println!("Client {} timed out (no PING)", client_udp_addr);
             break;
         }
 
@@ -56,12 +55,11 @@ fn udp_streamer(
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
                 eprintln!("UDP recv error: {}", e);
-                println!("kill loop");
                 break;
             }
         }
 
-        match tick_recv.recv() {
+        match receiver.recv() {
             Ok(()) => {
                 let map = match quotes.read() {
                     Ok(m) => m,
@@ -96,7 +94,7 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
     let mut writer = stream.try_clone().expect("failed to clone stream");
     let mut reader = BufReader::new(stream);
 
-    let _ = writer.write_all(b"Welcome to the Qutes stream server!\n");
+    let _ = writer.write_all(b"Welcome to the Quotes stream server!\n");
     let _ = writer.flush();
     let mut line = String::new();
     loop {
@@ -115,6 +113,7 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
                 let mut parts = input.split_whitespace();
                 match parts.next() {
                     Some("STREAM") => {
+                        println!("STREAM");
                         let addr_str = match parts.next() {
                             Some(s) => s,
                             None => {
@@ -143,13 +142,13 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
                             }
                         };
                         if parsed_url.scheme() != "udp" {
-                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidAddress,);
+                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidAddress);
                             continue;
                         }
                         let host = parsed_url.host_str().unwrap_or("127.0.0.1");
                         let port = parsed_url.port().unwrap_or(0);
                         if port == 0 {
-                            let _ = writeln!(writer, "ERROR: port is required");
+                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidPort);
                             continue;
                         }
                         let tickers: Vec<String> = tickers_str
@@ -207,6 +206,7 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
                     }
 
                     Some("PING") => {
+                        println!("PING");
                         let _ = writeln!(writer, "PONG\n");
                     }
                     _ => {
@@ -263,7 +263,7 @@ impl QuoteHandler {
                 }
             }
             println!("update");
-            let sleep_ms = rand::thread_rng().gen_range(100..=1000);
+            let sleep_ms = rand::thread_rng().gen_range(1000..=2000);
             thread::sleep(time::Duration::from_millis(sleep_ms));
         }
     }
