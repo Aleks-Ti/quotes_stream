@@ -21,6 +21,7 @@ UDP прослушиватель для проверки:
 ```bash
 nc -u -l 34254
 nc -u -l 34255
+nc -u -l 34256
 ```
 
 ## Клиентский сервер
@@ -31,4 +32,7 @@ cargo run --bin client -- --help
 
 ```bash
 cargo run --bin client -- --server-addr 127.0.0.1:8080 --udp-port 34254 --tickers-file test_tickers.txt
+cargo run --bin client -- --server-addr 127.0.0.1:8080 --udp-port 34255 --tickers-file test_tickers.txt
+cargo run --bin client -- --server-addr 127.0.0.1:8080 --udp-port 34256 --tickers-file test_tickers.txt
+cargo run --bin client -- --server-addr 127.0.0.1:8080 --udp-port 34257 --tickers-file test_tickers.txt
 ```

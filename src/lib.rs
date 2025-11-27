@@ -110,7 +110,6 @@ impl StockQuote {
         bytes.extend_from_slice(self.volume.to_string().as_bytes());
         bytes.push(b'|');
         bytes.extend_from_slice(self.timestamp.to_string().as_bytes());
-        bytes.push(b'\n');
         bytes
     }
 

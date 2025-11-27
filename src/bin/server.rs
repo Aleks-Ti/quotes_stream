@@ -5,6 +5,7 @@ use quotes_stream::ParseStreamError;
 use quotes_stream::StockQuote;
 use quotes_stream::{BASE_SERVER_TCP_URL, UDP_STREAM_TIMEOUT};
 use rand::Rng;
+use std::io::BufWriter;
 use std::net::UdpSocket;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
@@ -73,10 +74,8 @@ fn udp_streamer(
                         lines.push(line);
                     }
                 }
-                println!("{:?}", tickers);
                 if !lines.is_empty() {
                     let msg = lines.join("\n") + "\n";
-                    println!("{}", msg);
                     if let Err(e) = server_client_udp_socket.send_to(msg.as_bytes(), client_udp_addr) {
                         eprintln!("UDP send error to {}: {}", client_udp_addr, e);
                         break;
@@ -91,7 +90,8 @@ fn udp_streamer(
 }
 
 fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
-    let mut writer = stream.try_clone().expect("failed to clone stream");
+    let stream_clone = stream.try_clone().expect("failed to clone stream");
+    let mut writer = BufWriter::new(stream_clone);
     let mut reader = BufReader::new(stream);
 
     let _ = writer.write_all(b"Welcome to the Quotes stream server!\n");
@@ -118,6 +118,7 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
                             Some(s) => s,
                             None => {
                                 let _ = writeln!(writer, "ERROR: {}", ParseStreamError::MissingAddress);
+                                writer.flush().unwrap();
                                 continue;
                             }
                         };
@@ -126,29 +127,34 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
                             Some(s) => s,
                             None => {
                                 let _ = writeln!(writer, "ERROR: {}", ParseStreamError::MissingTickers);
+                                writer.flush().unwrap();
                                 continue;
                             }
                         };
 
                         if !addr_str.starts_with("udp://") {
                             let _ = writeln!(writer, "ERROR: {}", ParseStreamError::MissingAddress);
+                            writer.flush().unwrap();
                             continue;
                         }
                         let parsed_url = match Url::parse(addr_str) {
                             Ok(url) => url,
                             Err(_) => {
                                 let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidUrl);
+                                writer.flush().unwrap();
                                 continue;
                             }
                         };
                         if parsed_url.scheme() != "udp" {
                             let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidAddress);
+                            writer.flush().unwrap();
                             continue;
                         }
                         let host = parsed_url.host_str().unwrap_or("127.0.0.1");
                         let port = parsed_url.port().unwrap_or(0);
                         if port == 0 {
                             let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidPort);
+                            writer.flush().unwrap();
                             continue;
                         }
                         let tickers: Vec<String> = tickers_str
@@ -164,25 +170,29 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
 
                         if !tickers.iter().all(|ticker| map.contains_key(ticker)) {
                             let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidTickers);
+                            writer.flush().unwrap();
                             continue;
                         }
 
                         if tickers.is_empty() {
                             let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidTickers);
+                            writer.flush().unwrap();
                             continue;
                         }
                         let addr = format!("{}:{}", host, port);
-                        let client_udp_socket = match UdpSocket::bind("0.0.0.0:0") {
+                        let client_udp_socket = match UdpSocket::bind("127.0.0.1:0") {
                             Ok(sock) => Arc::new(sock),
                             Err(e) => {
                                 let _ = writeln!(writer, "ERROR: failed to create UDP socket: {}", e);
+                                writer.flush().unwrap();
                                 return;
                             }
                         };
-                        let server_udp_addr = match client_udp_socket.local_addr() {
+                        let server_udp_addr: std::net::SocketAddr = match client_udp_socket.local_addr() {
                             Ok(addr) => addr,
                             Err(e) => {
                                 let _ = writeln!(writer, "ERROR: failed to get local addr: {}", e);
+                                writer.flush().unwrap();
                                 return;
                             }
                         };
@@ -192,7 +202,8 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
                         }
                         match addr.parse::<std::net::SocketAddr>() {
                             Ok(client_socket_addr) => {
-                                let _ = writeln!(writer, "OK: streaming_to: {}, send_PING_to {}", client_socket_addr, server_udp_addr);
+                                let _ = writeln!(writer, "OK: send_PING_to {}", server_udp_addr);
+                                writer.flush().unwrap();
                                 let quotes_clone = quotes.clone();
                                 std::thread::spawn(move || {
                                     udp_streamer(client_socket_addr, tickers, quotes_clone, client_udp_socket, receiver);
@@ -208,9 +219,11 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
                     Some("PING") => {
                         println!("PING");
                         let _ = writeln!(writer, "PONG\n");
+                        writer.flush().unwrap();
                     }
                     _ => {
                         let _ = writeln!(writer, "ERROR: unknown command");
+                        writer.flush().unwrap();
                     }
                 };
             }
@@ -262,8 +275,7 @@ impl QuoteHandler {
                     }
                 }
             }
-            println!("update");
-            let sleep_ms = rand::thread_rng().gen_range(1000..=2000);
+            let sleep_ms = rand::thread_rng().gen_range(10..=100);
             thread::sleep(time::Duration::from_millis(sleep_ms));
         }
     }
