@@ -96,8 +96,7 @@ impl TcpClient {
 
                     let udp_client_clone2 = udp_client.clone();
                     let udp_stream_clone2 = udp_stream.clone();
-                    let target_clone = target_addr.clone();
-                    let _ = std::thread::spawn(move || udp_client_clone2.keep_alive(udp_stream_clone2, target_clone));
+                    let _ = std::thread::spawn(move || udp_client_clone2.keep_alive(udp_stream_clone2, target_addr));
 
                     thread.join().unwrap();
                 }
