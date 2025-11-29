@@ -56,7 +56,12 @@ pub struct StockQuote {
 
 impl Default for StockQuote {
     fn default() -> Self {
-        StockQuote::new()
+        Self {
+            ticker: "DEFAULT".to_string(),
+            volume: 100_u32,
+            price: 100.0_f64,
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        }
     }
 }
 
@@ -68,21 +73,14 @@ impl fmt::Display for StockQuote {
 
 impl StockQuote {
     /// Конструктор.
-    pub fn new() -> Self {
+    pub fn new(ticker: String, volume: u32, price: f64, timestamp: u64) -> Self {
         Self {
-            ticker: "DEFAULT".to_string(),
-            volume: 100_u32,
-            price: 100.0_f64,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            ticker,
+            volume,
+            price,
+            timestamp,
         }
     }
-    // Преобразование данных из структуры [`StockQuote`] в строковое представление.
-    // pub fn to_string(&self) -> String {
-    //     format!(
-    //         "{}|{}|{}|{}",
-    //         self.ticker, self.price, self.volume, self.timestamp
-    //     )
-    // }
 
     /// Преобразование данных из строкового представления в структуру [`StockQuote`].
     /// Пример данных с которыми работает данный метод: [`StockQuote::to_string`].
@@ -98,6 +96,14 @@ impl StockQuote {
         } else {
             None
         }
+    }
+
+    /// JSON сериализация. Для поставки данных катировок в JSON-формате.
+    pub fn to_json(&self) -> String {
+        format!(
+            r#"{{"ticker":"{}","price":{},"volume":{},"timestamp":{}}}"#,
+            self.ticker, self.price, self.volume, self.timestamp
+        )
     }
 
     /// Бинарная сериализация. Для поставки данных катировок в бинароном виде.

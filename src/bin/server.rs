@@ -113,7 +113,6 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
                 let mut parts = input.split_whitespace();
                 match parts.next() {
                     Some("STREAM") => {
-                        println!("STREAM");
                         let addr_str = match parts.next() {
                             Some(s) => s,
                             None => {
@@ -217,7 +216,6 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
                     }
 
                     Some("PING") => {
-                        println!("PING");
                         let _ = writeln!(writer, "PONG\n");
                         writer.flush().unwrap();
                     }
@@ -245,7 +243,7 @@ impl QuoteHandler {
         let file_reader = BufReader::new(file_with_all_quotes.unwrap());
         for line in file_reader.lines() {
             let line_string = line.expect("Ошибка чтения строки из файла");
-            let mut default_quotes = StockQuote::new();
+            let mut default_quotes = StockQuote::default();
             if let Some(quote) = default_quotes.generate_quote(&line_string) {
                 data.insert(line_string, quote);
             }
@@ -275,7 +273,7 @@ impl QuoteHandler {
                     }
                 }
             }
-            let sleep_ms = rand::thread_rng().gen_range(10..=100);
+            let sleep_ms = rand::thread_rng().gen_range(100..=1000);
             thread::sleep(time::Duration::from_millis(sleep_ms));
         }
     }
@@ -285,6 +283,7 @@ type StockMap = Arc<RwLock<HashMap<String, StockQuote>>>;
 type SendersList = Arc<RwLock<Vec<Sender<()>>>>;
 
 fn main() -> std::io::Result<()> {
+    println!("Starting Quotes Stream Server at {}", BASE_SERVER_TCP_URL);
     let quotes = Arc::new(RwLock::new(QuoteHandler::base_load_quotes().unwrap()));
     let senders = Arc::new(RwLock::new(Vec::new()));
     let listener = TcpListener::bind(BASE_SERVER_TCP_URL)?;

@@ -1,11 +1,14 @@
+//! Клиент для получения стриминговых данных о котировках акций по TCP и UDP.
+
+#![warn(missing_docs)]
 use clap::Parser;
+use quotes_stream::StockQuote;
 use std::io::{BufRead, Write};
 use std::{
     io::BufReader,
     net::{TcpStream, UdpSocket},
     sync::Arc,
 };
-
 #[derive(Parser, Debug, Clone)]
 struct Command {
     /// Введите адрес на котором будет работать client. Пример: 127.0.0.1:8001,
@@ -20,6 +23,7 @@ struct Command {
     tickers_path: String,
 }
 
+/// TCP клиент для общения с сервером.
 pub struct TcpClient {}
 
 impl TcpClient {
@@ -54,7 +58,6 @@ impl TcpClient {
         let udp_client = Arc::new(UpdClient::new());
         loop {
             line.clear();
-
             match reader.read_line(&mut line) {
                 Ok(0) => {
                     continue;
@@ -68,7 +71,7 @@ impl TcpClient {
                     let udp_stream: Arc<UdpSocket> = Arc::new(stream);
                     let local_addr = udp_stream.local_addr()?;
 
-                    let cmd = format!("STREAM udp://{} {}\n", local_addr, tickers.join(","));
+                    let cmd: String = format!("STREAM udp://{} {}\n", local_addr, tickers.join(","));
                     let response = self.send_cmd_and_read(&mut writer, &mut reader, &cmd)?;
 
                     let clean = if response.trim().is_empty() {
@@ -78,8 +81,6 @@ impl TcpClient {
                     } else {
                         response.trim().to_string()
                     };
-
-                    println!("STREAM response: {}", clean);
 
                     let target_addr = match clean.strip_prefix("OK: send_PING_to ") {
                         Some(addr) => addr.to_string(),
@@ -127,7 +128,12 @@ impl UpdClient {
         loop {
             match udp_socket.recv(&mut buf) {
                 Ok(n) => match std::str::from_utf8(&buf[..n]) {
-                    Ok(msg) => println!("{}", msg),
+                    Ok(msg) => {
+                        for line in msg.lines() {
+                            let stock = StockQuote::from_string(line).unwrap();
+                            println!("{}", stock.to_json());
+                        }
+                    }
                     Err(e) => eprintln!("Received invalid UTF-8 data: {:?}", e),
                 },
                 Err(e) => {
@@ -154,7 +160,6 @@ impl UpdClient {
     }
 }
 
-// cargo run --bin client -- --server-addr 127.0.0.1:8080 --udp-port 34254 --tickers-file test_tickers.txt
 fn main() -> std::io::Result<()> {
     let args = Command::parse();
     let data = std::fs::read_to_string(&args.tickers_path)?;
