@@ -47,7 +47,7 @@ impl TcpClient {
         let udp_client = Arc::new(UpdClient::new());
         match reader.read_line(&mut line) {
             Ok(0) => {
-                println!("_0_");
+                eprintln!("TCP connect FIN");
             }
             Ok(_) => {
                 let stream = udp_client.create_upd_socket(&udp_port)?;

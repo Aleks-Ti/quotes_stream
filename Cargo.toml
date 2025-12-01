@@ -8,6 +8,8 @@ rand = "0.8"
 clap = { version = "4.0", features = ["derive"] }
 url = "2"
 anyhow = "1.0.100"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [[bin]]
 name = "server"

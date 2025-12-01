@@ -1,10 +1,10 @@
 //! Сервер для поставки данных катировок.
 #![warn(missing_docs)]
-use clap::Error;
 use quotes_stream::ParseStreamError;
 use quotes_stream::StockQuote;
 use quotes_stream::{BASE_SERVER_TCP_URL, UDP_STREAM_TIMEOUT};
 use rand::Rng;
+use std::io;
 use std::io::BufWriter;
 use std::net::UdpSocket;
 use std::sync::mpsc::{Receiver, Sender};
@@ -94,14 +94,14 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
     let mut writer = BufWriter::new(stream_clone);
     let mut reader = BufReader::new(stream);
 
-    let _ = writer.write_all(b"Welcome to the Quotes stream server!\n");
+    let _ = writer.write_all(b"Welcome!\n");
     let _ = writer.flush();
     let mut line = String::new();
     loop {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => {
-                continue;
+                break;
             }
             Ok(_) => {
                 let input = line.trim();
@@ -214,11 +214,6 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
                             }
                         }
                     }
-
-                    Some("PING") => {
-                        let _ = writeln!(writer, "PONG\n");
-                        writer.flush().unwrap();
-                    }
                     _ => {
                         let _ = writeln!(writer, "ERROR: unknown command");
                         writer.flush().unwrap();
@@ -237,15 +232,19 @@ pub struct QuoteHandler {}
 
 impl QuoteHandler {
     /// Загрузчик default данных для stream катировок.
-    pub fn base_load_quotes() -> Result<HashMap<String, StockQuote>, Error> {
+    pub fn base_load_quotes() -> io::Result<HashMap<String, StockQuote>> {
+        let file = fs::File::open("tickers.txt")?;
+        let reader = BufReader::new(file);
         let mut data = HashMap::new();
-        let file_with_all_quotes = fs::File::open("tickers.txt");
-        let file_reader = BufReader::new(file_with_all_quotes.unwrap());
-        for line in file_reader.lines() {
-            let line_string = line.expect("Ошибка чтения строки из файла");
-            let mut default_quotes = StockQuote::default();
-            if let Some(quote) = default_quotes.generate_quote(&line_string) {
-                data.insert(line_string, quote);
+        for line in reader.lines() {
+            let line = line?;
+            let ticker = line.trim();
+            if ticker.is_empty() {
+                continue;
+            }
+            let mut quote = StockQuote::default();
+            if let Some(quote) = quote.generate_quote(ticker) {
+                data.insert(ticker.to_string(), quote);
             }
         }
         Ok(data)
@@ -255,25 +254,48 @@ impl QuoteHandler {
     pub fn update_quotes(quotes: StockMap, senders: SendersList) {
         loop {
             {
-                let mut map = quotes.write().unwrap();
+                let mut map = match quotes.write() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        tracing::warn!("Quotes lock poisoned, recovering");
+                        poisoned.into_inner()
+                    }
+                };
                 for (ticker, stock) in map.iter_mut() {
                     stock.generate_quote(ticker);
                 }
+            }
+
+            {
+                let senders_guard = match senders.read() {
+                    Ok(s) => s,
+                    Err(poisoned) => {
+                        tracing::warn!("Senders lock poisoned, recovering");
+                        poisoned.into_inner()
+                    }
+                };
                 let mut dead_senders = Vec::new();
-                for (i, sender) in senders.read().unwrap().iter().enumerate() {
+                for (i, sender) in senders_guard.iter().enumerate() {
                     if sender.send(()).is_err() {
                         dead_senders.push(i);
                     }
                 }
 
                 if !dead_senders.is_empty() {
-                    let mut list = senders.write().unwrap();
+                    let mut list = match senders.write() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => {
+                            tracing::warn!("Senders write lock poisoned, recovering");
+                            poisoned.into_inner()
+                        }
+                    };
                     for &i in dead_senders.iter().rev() {
                         list.remove(i);
                     }
                 }
             }
             let sleep_ms = rand::thread_rng().gen_range(100..=1000);
+            tracing::info!("Updating quotes, sleeping for {} ms", sleep_ms);
             thread::sleep(time::Duration::from_millis(sleep_ms));
         }
     }
@@ -283,23 +305,38 @@ type StockMap = Arc<RwLock<HashMap<String, StockQuote>>>;
 type SendersList = Arc<RwLock<Vec<Sender<()>>>>;
 
 fn main() -> std::io::Result<()> {
-    println!("Starting Quotes Stream Server at {}", BASE_SERVER_TCP_URL);
-    let quotes = Arc::new(RwLock::new(QuoteHandler::base_load_quotes().unwrap()));
+    tracing_subscriber::fmt().with_target(false).with_level(true).init();
+    tracing::info!("Starting Quotes Stream Server at {}", BASE_SERVER_TCP_URL);
+    let base_quotes = match QuoteHandler::base_load_quotes() {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!("Failed to load tickers file: {}", e);
+            return Err(e);
+        }
+    };
+    let quotes = Arc::new(RwLock::new(base_quotes));
     let senders = Arc::new(RwLock::new(Vec::new()));
+
     let listener = TcpListener::bind(BASE_SERVER_TCP_URL)?;
+    tracing::info!("TCP listener bound on {}", BASE_SERVER_TCP_URL);
+
     let quotes_for_updater = quotes.clone();
     let clone_senders = senders.clone();
     thread::spawn(move || QuoteHandler::update_quotes(quotes_for_updater, clone_senders));
+
     for stream in listener.incoming() {
-        let clone_senders = senders.clone();
-        let quotes_for_read = quotes.clone();
         match stream {
             Ok(stream) => {
+                let quotes_for_read = quotes.clone();
+                let clone_senders = senders.clone();
+                tracing::info!("New TCP connection from {:?}", stream.peer_addr());
                 thread::spawn(move || {
                     tcp_handler(stream, quotes_for_read, clone_senders);
                 });
             }
-            Err(e) => eprintln!("Connection failed: {}", e),
+            Err(e) => {
+                tracing::error!("Failed to accept TCP connection: {}", e);
+            }
         }
     }
     Ok(())
