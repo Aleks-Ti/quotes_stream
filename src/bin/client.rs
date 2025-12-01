@@ -39,71 +39,54 @@ impl TcpClient {
         Ok(line)
     }
 
-    fn ping(&self, reader: &mut dyn BufRead, writer: &mut dyn Write) -> std::io::Result<()> {
-        let response = self.send_cmd_and_read(writer, reader, "PING\n")?;
-        match response.trim() {
-            "PONG" => {
-                println!("Received PONG");
-                Ok(())
-            }
-            _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Unexpected PONG")),
-        }
-    }
-
     fn handler(&self, address: String, tickers: Vec<String>, udp_port: String) -> Result<(), std::io::Error> {
         let tcp_stream = self.create_tcp_connect(&address)?;
         let mut writer = tcp_stream.try_clone()?;
         let mut line = String::new();
         let mut reader = BufReader::new(tcp_stream);
         let udp_client = Arc::new(UpdClient::new());
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => {
-                    continue;
-                }
-                Ok(_) => {
-                    if let Err(e) = self.ping(&mut reader, &mut writer) {
-                        eprintln!("PING failed: {}", e);
-                        continue;
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                println!("_0_");
+            }
+            Ok(_) => {
+                let stream = udp_client.create_upd_socket(&udp_port)?;
+                let udp_stream: Arc<UdpSocket> = Arc::new(stream);
+                let local_addr = udp_stream.local_addr()?;
+
+                let cmd: String = format!("STREAM udp://{} {}\n", local_addr, tickers.join(","));
+                let response = self.send_cmd_and_read(&mut writer, &mut reader, &cmd)?;
+
+                let clean = if response.trim().is_empty() {
+                    let mut second = String::new();
+                    reader.read_line(&mut second)?;
+                    second.trim().to_string()
+                } else {
+                    response.trim().to_string()
+                };
+
+                let target_addr = match clean.strip_prefix("OK: send_PING_to ") {
+                    Some(addr) => addr.to_string(),
+                    None => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Invalid STREAM response: {}", clean),
+                        ));
                     }
-                    let stream = udp_client.create_upd_socket(&udp_port)?;
-                    let udp_stream: Arc<UdpSocket> = Arc::new(stream);
-                    let local_addr = udp_stream.local_addr()?;
+                };
 
-                    let cmd: String = format!("STREAM udp://{} {}\n", local_addr, tickers.join(","));
-                    let response = self.send_cmd_and_read(&mut writer, &mut reader, &cmd)?;
+                let udp_client_clone = udp_client.clone();
+                let udp_stream_clone = udp_stream.clone();
+                let thread = std::thread::spawn(move || udp_client_clone.listener(udp_stream_clone));
 
-                    let clean = if response.trim().is_empty() {
-                        let mut second = String::new();
-                        reader.read_line(&mut second)?;
-                        second.trim().to_string()
-                    } else {
-                        response.trim().to_string()
-                    };
+                let udp_client_clone2 = udp_client.clone();
+                let udp_stream_clone2 = udp_stream.clone();
+                let _ = std::thread::spawn(move || udp_client_clone2.keep_alive(udp_stream_clone2, target_addr));
 
-                    let target_addr = match clean.strip_prefix("OK: send_PING_to ") {
-                        Some(addr) => addr.to_string(),
-                        None => {
-                            eprintln!("Invalid STREAM response: {}", clean);
-                            continue;
-                        }
-                    };
-
-                    let udp_client_clone = udp_client.clone();
-                    let udp_stream_clone = udp_stream.clone();
-                    let thread = std::thread::spawn(move || udp_client_clone.listener(udp_stream_clone));
-
-                    let udp_client_clone2 = udp_client.clone();
-                    let udp_stream_clone2 = udp_stream.clone();
-                    let _ = std::thread::spawn(move || udp_client_clone2.keep_alive(udp_stream_clone2, target_addr));
-
-                    thread.join().unwrap();
-                }
-                Err(e) => {
-                    eprintln!("TCP read error: {}", e);
-                    break;
-                }
+                thread.join().unwrap();
+            }
+            Err(e) => {
+                eprintln!("TCP read error: {}", e);
             }
         }
         Ok(())
