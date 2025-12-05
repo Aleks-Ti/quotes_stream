@@ -1,11 +1,11 @@
 //! Сервер для поставки данных катировок.
 #![warn(missing_docs)]
-use quotes_stream::ParseStreamError;
 use quotes_stream::StockQuote;
-use quotes_stream::{BASE_SERVER_TCP_URL, UDP_STREAM_TIMEOUT};
+use quotes_stream::{BASE_HOST, BASE_TCP_SERVER_PORT, DEFAULT_UDP_PORT, UDP_STREAM_TIMEOUT};
+use quotes_stream::{ClientError, ServerError};
 use rand::Rng;
 use std::io;
-use std::io::BufWriter;
+use std::io::LineWriter;
 use std::net::UdpSocket;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
@@ -33,7 +33,7 @@ fn udp_streamer(
     let ping_timeout = Duration::from_secs(UDP_STREAM_TIMEOUT);
     let mut buf = [0; 64];
 
-    println!(
+    tracing::info!(
         "UDP streamer for {} using local port {}",
         client_udp_addr,
         server_client_udp_socket.local_addr().unwrap().port()
@@ -89,13 +89,12 @@ fn udp_streamer(
     }
 }
 
-fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
-    let stream_clone = stream.try_clone().expect("failed to clone stream");
-    let mut writer = BufWriter::new(stream_clone);
+fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) -> Result<(), ServerError> {
+    let stream_clone = stream.try_clone()?;
+    let mut writer = LineWriter::new(stream_clone);
     let mut reader = BufReader::new(stream);
 
-    let _ = writer.write_all(b"Welcome!\n");
-    let _ = writer.flush();
+    writeln!(writer, "Welcome!\n")?;
     let mut line = String::new();
     loop {
         line.clear();
@@ -106,18 +105,21 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
             Ok(_) => {
                 let input = line.trim();
                 if input.is_empty() {
-                    let _ = writer.flush();
-                    continue;
+                    match writer.flush() {
+                        Ok(_) => continue,
+                        Err(e) => {
+                            tracing::error!("ERROR: {}", e);
+                            break;
+                        }
+                    }
                 }
-
                 let mut parts = input.split_whitespace();
                 match parts.next() {
                     Some("STREAM") => {
                         let addr_str = match parts.next() {
                             Some(s) => s,
                             None => {
-                                let _ = writeln!(writer, "ERROR: {}", ParseStreamError::MissingAddress);
-                                writer.flush().unwrap();
+                                writeln!(writer, "ERROR: {}", ClientError::MissingAddress)?;
                                 continue;
                             }
                         };
@@ -125,37 +127,40 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
                         let tickers_str = match parts.next() {
                             Some(s) => s,
                             None => {
-                                let _ = writeln!(writer, "ERROR: {}", ParseStreamError::MissingTickers);
-                                writer.flush().unwrap();
+                                writeln!(writer, "ERROR: {}", ClientError::MissingTickers)?;
                                 continue;
                             }
                         };
 
                         if !addr_str.starts_with("udp://") {
-                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::MissingAddress);
-                            writer.flush().unwrap();
+                            writeln!(writer, "ERROR: {}", ClientError::MissingAddress)?;
                             continue;
                         }
                         let parsed_url = match Url::parse(addr_str) {
                             Ok(url) => url,
                             Err(_) => {
-                                let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidUrl);
-                                writer.flush().unwrap();
+                                writeln!(writer, "ERROR: {}", ClientError::InvalidUrl)?;
                                 continue;
                             }
                         };
                         if parsed_url.scheme() != "udp" {
-                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidAddress);
-                            writer.flush().unwrap();
+                            writeln!(writer, "ERROR: {}", ClientError::InvalidAddress)?;
                             continue;
                         }
-                        let host = parsed_url.host_str().unwrap_or("127.0.0.1");
-                        let port = parsed_url.port().unwrap_or(0);
-                        if port == 0 {
-                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidPort);
-                            writer.flush().unwrap();
-                            continue;
-                        }
+                        let host = match parsed_url.host_str() {
+                            Some(h) => h,
+                            None => {
+                                let _ = writeln!(writer, "ERROR: {}", ClientError::InvalidAddress);
+                                continue;
+                            }
+                        };
+                        let port = match parsed_url.port() {
+                            Some(p) => p,
+                            None => {
+                                let _ = writeln!(writer, "ERROR: {}", ClientError::InvalidPort);
+                                continue;
+                            }
+                        };
                         let tickers: Vec<String> = tickers_str
                             .split(',')
                             .map(|s| s.trim().to_string())
@@ -164,70 +169,80 @@ fn tcp_handler(stream: TcpStream, quotes: StockMap, senders: SendersList) {
 
                         let map = match quotes.read() {
                             Ok(m) => m,
-                            Err(_) => return,
+                            Err(e) => {
+                                writeln!(writer, "ERROR:{}", ServerError::PoisonedLock)?;
+                                tracing::error!("ERROR: can't reed StockQuotes[map]: {}", e);
+                                break;
+                            }
                         };
 
                         if !tickers.iter().all(|ticker| map.contains_key(ticker)) {
-                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidTickers);
-                            writer.flush().unwrap();
+                            writeln!(writer, "ERROR: {}", ClientError::InvalidTickers)?;
                             continue;
                         }
 
                         if tickers.is_empty() {
-                            let _ = writeln!(writer, "ERROR: {}", ParseStreamError::InvalidTickers);
-                            writer.flush().unwrap();
+                            writeln!(writer, "ERROR: {}", ClientError::InvalidTickers)?;
                             continue;
                         }
-                        let addr = format!("{}:{}", host, port);
-                        let client_udp_socket = match UdpSocket::bind("127.0.0.1:0") {
+                        let client_addr = format!("{}:{}", host, port);
+                        let udp_socket = match UdpSocket::bind(format!("{}:{}", BASE_HOST, DEFAULT_UDP_PORT)) {
                             Ok(sock) => Arc::new(sock),
                             Err(e) => {
-                                let _ = writeln!(writer, "ERROR: failed to create UDP socket: {}", e);
-                                writer.flush().unwrap();
-                                return;
+                                writeln!(writer, "ERROR:{}", ServerError::BadGateway)?;
+                                tracing::error!("ERROR: failed to create UDP socket: {}", e);
+                                break;
                             }
                         };
-                        let server_udp_addr: std::net::SocketAddr = match client_udp_socket.local_addr() {
+                        let server_udp_addr: std::net::SocketAddr = match udp_socket.local_addr() {
                             Ok(addr) => addr,
                             Err(e) => {
-                                let _ = writeln!(writer, "ERROR: failed to get local addr: {}", e);
-                                writer.flush().unwrap();
-                                return;
+                                writeln!(writer, "ERROR:{}", ServerError::BadGateway)?;
+                                tracing::error!("ERROR: failed to get local addr: {}", e);
+                                break;
                             }
                         };
                         let (sender, receiver) = std::sync::mpsc::channel();
                         {
-                            senders.write().unwrap().push(sender);
+                            match senders.write() {
+                                Ok(mut res) => res.push(sender),
+                                Err(e) => {
+                                    writeln!(writer, "ERROR: {}", ServerError::BadGateway)?;
+                                    tracing::error!("ERROR: {}", e);
+                                    break;
+                                }
+                            }
                         }
-                        match addr.parse::<std::net::SocketAddr>() {
+                        match client_addr.parse::<std::net::SocketAddr>() {
                             Ok(client_socket_addr) => {
-                                let _ = writeln!(writer, "OK: send_PING_to {}", server_udp_addr);
-                                writer.flush().unwrap();
+                                writeln!(writer, "OK: send_PING_to {}", server_udp_addr)?;
                                 let quotes_clone = quotes.clone();
                                 std::thread::spawn(move || {
-                                    udp_streamer(client_socket_addr, tickers, quotes_clone, client_udp_socket, receiver);
+                                    udp_streamer(client_socket_addr, tickers, quotes_clone, udp_socket, receiver);
                                 });
                             }
-                            Err(_) => {
-                                let _ = writeln!(writer, "ERROR: invalid socket address");
-                                return;
+                            Err(e) => {
+                                writeln!(writer, "ERROR:{}", ServerError::BadGateway)?;
+                                tracing::error!("ERROR: invalid socket address: {}", e);
+                                break;
                             }
                         }
                     }
                     _ => {
-                        let _ = writeln!(writer, "ERROR: unknown command");
-                        writer.flush().unwrap();
+                        writeln!(writer, "ERROR: unknown command")?;
                     }
                 };
             }
-            Err(_) => {
-                return;
+            Err(e) => {
+                tracing::error!("ERROR: TCP read line from client connect: {}", e);
+                break;
             }
         }
     }
+    Ok(())
 }
 
-/// Базовый обработчик для работы со [StockQuote]
+/// Базовый обработчик для работы с [StockQuote]
 pub struct QuoteHandler {}
 
 impl QuoteHandler {
@@ -295,7 +310,6 @@ impl QuoteHandler {
                 }
             }
             let sleep_ms = rand::thread_rng().gen_range(100..=1000);
-            tracing::info!("Updating quotes, sleeping for {} ms", sleep_ms);
             thread::sleep(time::Duration::from_millis(sleep_ms));
         }
     }
@@ -306,7 +320,10 @@ type SendersList = Arc<RwLock<Vec<Sender<()>>>>;
 
 fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt().with_target(false).with_level(true).init();
-    tracing::info!("Starting Quotes Stream Server at {}", BASE_SERVER_TCP_URL);
+    tracing::info!(
+        "Starting Quotes Stream Server at {}",
+        format!("{}:{}", BASE_HOST, BASE_TCP_SERVER_PORT)
+    );
     let base_quotes = match QuoteHandler::base_load_quotes() {
         Ok(q) => q,
         Err(e) => {
@@ -317,8 +334,8 @@ fn main() -> std::io::Result<()> {
     let quotes = Arc::new(RwLock::new(base_quotes));
     let senders = Arc::new(RwLock::new(Vec::new()));
 
-    let listener = TcpListener::bind(BASE_SERVER_TCP_URL)?;
-    tracing::info!("TCP listener bound on {}", BASE_SERVER_TCP_URL);
+    let listener = TcpListener::bind(format!("{}:{}", BASE_HOST, BASE_TCP_SERVER_PORT))?;
+    tracing::info!("TCP listener bound on {}", format!("{}:{}", BASE_HOST, BASE_TCP_SERVER_PORT));
 
     let quotes_for_updater = quotes.clone();
     let clone_senders = senders.clone();
@@ -331,7 +348,7 @@ fn main() -> std::io::Result<()> {
                 let clone_senders = senders.clone();
                 tracing::info!("New TCP connection from {:?}", stream.peer_addr());
                 thread::spawn(move || {
-                    tcp_handler(stream, quotes_for_read, clone_senders);
+                    let _ = tcp_handler(stream, quotes_for_read, clone_senders);
                 });
             }
             Err(e) => {

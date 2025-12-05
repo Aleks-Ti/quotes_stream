@@ -5,13 +5,17 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Адрес для прослушивания [server.rs]
-pub const BASE_SERVER_TCP_URL: &str = "127.0.0.1:8080";
+pub const BASE_HOST: &str = "127.0.0.1";
+/// Дефолтный порт для TCP слушателя.
+pub const BASE_TCP_SERVER_PORT: &str = "8080";
+/// Дефолтный порт для UDP слушателя.
+pub const DEFAULT_UDP_PORT: &str = "0";
 /// Адрес общения с сервером [client.rs]
 pub const UDP_STREAM_TIMEOUT: u64 = 5;
 
 /// Ошибки клиенского запроса.
 #[derive(Debug)]
-pub enum ParseStreamError {
+pub enum ClientError {
     /// Отсутствует указатель но адрес udp:// для стриминга данных.
     MissingAddress,
     /// Отсутствуют Tickers для стриминга.
@@ -26,18 +30,46 @@ pub enum ParseStreamError {
     InvalidPort,
 }
 
-impl std::fmt::Display for ParseStreamError {
+impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParseStreamError::MissingAddress => write!(f, "missing UDP address. Expected udp://..."),
-            ParseStreamError::MissingTickers => {
+            ClientError::MissingAddress => write!(f, "missing UDP address. Expected udp://..."),
+            ClientError::MissingTickers => {
                 write!(f, "missing ticker list. Expected message -> STREAM udp://127.0.0.1:34254 AAPL,TSLA")
             }
-            ParseStreamError::InvalidUrl => write!(f, "invalid URL format"),
-            ParseStreamError::InvalidAddress => write!(f, "invalid socket address"),
-            ParseStreamError::InvalidTickers => write!(f, "no valid tickers provided"),
-            ParseStreamError::InvalidPort => write!(f, "no valid port"),
+            ClientError::InvalidUrl => write!(f, "invalid URL format"),
+            ClientError::InvalidAddress => write!(f, "invalid socket address"),
+            ClientError::InvalidTickers => write!(f, "no valid tickers provided"),
+            ClientError::InvalidPort => write!(f, "no valid port"),
         }
+    }
+}
+
+/// Ошибки сервера.
+#[derive(Debug)]
+pub enum ServerError {
+    /// Ошибка IO
+    Io(std::io::Error),
+    /// Ошибка чтения StockQuotes
+    PoisonedLock,
+    /// Ошибка на стороне сервера
+    BadGateway,
+}
+
+impl std::fmt::Display for ServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServerError::Io(e) => write!(f, "I/O error: {}", e),
+            ServerError::PoisonedLock => write!(f, "internal lock poisoned"),
+            ServerError::BadGateway => write!(f, "bad gateway"),
+        }
+    }
+}
+impl std::error::Error for ServerError {}
+
+impl From<std::io::Error> for ServerError {
+    fn from(e: std::io::Error) -> Self {
+        ServerError::Io(e)
     }
 }
 
