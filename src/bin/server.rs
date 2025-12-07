@@ -117,6 +117,7 @@ impl TcpHandler {
             line.clear();
             match reader.read_line(&mut line) {
                 Ok(0) => {
+                    tracing::info!("TCP connection closed by peer");
                     break;
                 }
                 Ok(_) => {
@@ -215,7 +216,7 @@ impl TcpHandler {
                             }
                             match client_addr.parse::<std::net::SocketAddr>() {
                                 Ok(client_socket_addr) => {
-                                    writeln!(writer, "OK: send_PING_to {}", server_udp_addr)?;
+                                    writeln!(writer, "OK: STREAM: {}", server_udp_addr)?;
                                     let quotes_clone = quotes.clone();
                                     std::thread::spawn(move || {
                                         udp_streamer(client_socket_addr, tickers, quotes_clone, udp_socket, receiver);

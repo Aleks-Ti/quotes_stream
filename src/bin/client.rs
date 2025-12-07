@@ -2,7 +2,7 @@
 
 #![warn(missing_docs)]
 use clap::Parser;
-use quotes_stream::StockQuote;
+use quotes_stream::{BASE_HOST, StockQuote};
 use std::io::{BufRead, Write};
 use std::{
     io::BufReader,
@@ -16,7 +16,7 @@ struct Command {
     server_addr: String,
     /// Укажите udp port на котором хотели бы прослушивать стриминг данных.
     #[arg(short = 'U', long("udp-port"))]
-    udp_port: String,
+    udp_port: u16,
     /// Укажите путь до файла с катировками, для которых хотели бы получать данные.
     /// Формат данных в файле: path/to/tickers.txt => AAPL\nMSFT\nGOOGL\nAMZN => каждый фильтр с новой строки.
     #[arg(short = 'T', long("tickers-file"))]
@@ -39,7 +39,7 @@ impl TcpClient {
         Ok(line)
     }
 
-    fn handler(&self, address: String, tickers: Vec<String>, udp_port: String) -> Result<(), std::io::Error> {
+    fn handler(&self, address: String, tickers: Vec<String>, udp_port: u16) -> Result<(), std::io::Error> {
         let tcp_stream = self.create_tcp_connect(&address)?;
         let mut writer = tcp_stream.try_clone()?;
         let mut line = String::new();
@@ -47,7 +47,8 @@ impl TcpClient {
         let udp_client = Arc::new(UpdClient::new());
         match reader.read_line(&mut line) {
             Ok(0) => {
-                eprintln!("TCP connect FIN");
+                tracing::info!("TCP connection closed by peer");
+                return Ok(());
             }
             Ok(_) => {
                 let stream = udp_client.create_upd_socket(&udp_port)?;
@@ -65,7 +66,7 @@ impl TcpClient {
                     response.trim().to_string()
                 };
 
-                let target_addr = match clean.strip_prefix("OK: send_PING_to ") {
+                let target_addr = match clean.strip_prefix("OK: STREAM: ") {
                     Some(addr) => addr.to_string(),
                     None => {
                         return Err(std::io::Error::new(
@@ -86,7 +87,7 @@ impl TcpClient {
                 thread.join().unwrap();
             }
             Err(e) => {
-                eprintln!("TCP read error: {}", e);
+                tracing::error!("TCP read error: {}", e);
             }
         }
         Ok(())
@@ -116,10 +117,10 @@ impl UpdClient {
                             println!("{}", stock.to_json());
                         }
                     }
-                    Err(e) => eprintln!("Received invalid UTF-8 data: {:?}", e),
+                    Err(e) => tracing::error!("Received invalid UTF-8 data: {}", e),
                 },
                 Err(e) => {
-                    eprintln!("UDP receive error: {}", e);
+                    tracing::error!("UDP receive error: {}", e);
                     break;
                 }
             }
@@ -131,13 +132,13 @@ impl UpdClient {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
             if let Err(e) = udp_socket.send(b"PING") {
-                eprintln!("Failed to send KEEPALIVE: {}", e);
+                tracing::error!("Failed to send KEEPALIVE: {}", e);
                 break;
             }
         }
     }
-    fn create_upd_socket(&self, port: &String) -> Result<UdpSocket, std::io::Error> {
-        let client_udp_socket = UdpSocket::bind(format!("127.0.0.1:{}", port))?;
+    fn create_upd_socket(&self, port: &u16) -> Result<UdpSocket, std::io::Error> {
+        let client_udp_socket = UdpSocket::bind(format!("{}:{}", BASE_HOST, port))?;
         Ok(client_udp_socket)
     }
 }
